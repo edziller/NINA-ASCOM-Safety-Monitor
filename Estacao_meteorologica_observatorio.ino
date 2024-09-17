@@ -32,8 +32,8 @@ byte chuva;
 
 
 //Conexão com a rede WiFi
-const char* ssid = "Ziller_NET_201";  // Rede WiFi
-const char* password = "Mobi3410X1h";  //Senha da Rede WiFi
+const char* ssid = "ssid";  // Rede WiFi
+const char* password = "psswd";  //Senha da Rede WiFi
 
 ESP8266WebServer server(80); //server na porta 80
 
