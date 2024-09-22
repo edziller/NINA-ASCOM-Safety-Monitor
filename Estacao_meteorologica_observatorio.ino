@@ -15,8 +15,15 @@ Adafruit_BMP280 bmp; // I2C - Cria um objeto para o Sensor de Pressão
 #define SENSOR_DHT 0 //Define a ligação ao pino de dados do sensor de umidade
 #define PIN_teto 2 //Define a saida para comando do relé pra fechar o teto em caso de condições atmosfericas adversas
 #define PIN_SENSOR_CHUVA A0 //Definindo a entrada do sensor de chuva
-
+#define numsamples 20 //Número de amostras para médias
 DHTesp dht; //Define o tipo de sensor DHT utilizado
+
+int amostra[numsamples];
+int media_sens_chuva = 0;
+int limite_IR_ceu = 10;
+int limite_chuva = 800;
+int limiar_tempo_chuva = 3000;
+int leitura_sensor_chuva;
 float u; // valor da umidade lido pelo DHT
 float t; // valor da temperatura lido pelo DHT
 float to; // temperatura do ponto de orvalho
@@ -32,8 +39,8 @@ byte chuva;
 
 
 //Conexão com a rede WiFi
-const char* ssid = "ssid";  // Rede WiFi
-const char* password = "psswd";  //Senha da Rede WiFi
+const char* ssid = "SSID";  // Rede WiFi
+const char* password = "PSWD";  //Senha da Rede WiFi
 
 ESP8266WebServer server(80); //server na porta 80
 
@@ -89,6 +96,7 @@ void loop()
   u = dht.getHumidity(); //Le o valor da umidade ESP
   t = dht.getTemperature(); //Le o valor da temperatura ESP
   float perc_h = u/100;
+  //Leitura do sensor de pressao
   p = bmp.readPressure()/100; // Valor da pressão em hPa
   //Chama a leitura do sensor IR
   if (therm.read()) //caso sucesso, retorna 0, caso contrario, 1
@@ -108,19 +116,19 @@ void loop()
       Serial.println("Falha na leitura da tempertatura do sensor infravermelho");
     }
     //Rotina para determiação se temos ou nao nuvens no ceu 
-    if(tIRceu > 0 ){
-      estado_nuvens = "Nublado";
+    if(tIRceu > limite_IR_ceu ){ //acaso a temperatura do ceu no zenite seja maior que 5 graus, entende-se que esta nublado
+          estado_nuvens = "Nublado";
       Serial.print("Condição do Ceu: ");
-      Serial.println(estado_nuvens);
-     
+      Serial.println(estado_nuvens);     
     }
     else{
       estado_nuvens = "Ceu limpo";
       Serial.print("Condição do Ceu: ");
-      Serial.println(estado_nuvens);
-   
+      Serial.println(estado_nuvens);   
     }
+    //Calculo da temperatura ambiente com base na media dos sensores DHT e MLX
     tavg = (tIRamb+t)/2;
+    //Calculo da temperatura do ponto de orvalho
     to = (b*(((a*tavg)/(b+tavg))+log(u/100)))/(a-((a*tavg)/(b+tavg)+log(u/100)));
     //leitura do sensor de pressão
     Serial.print(F("Pressão atmosférica = "));
@@ -138,23 +146,40 @@ void loop()
     Serial.print(F("T. de orvalho = "));
     Serial.print(to);
     Serial.println(" C");
-    Serial.println();
     //Leitura do sensor de chuva
-   Serial.print("Sensor de Chuva: ");
-   Serial.print(analogRead(PIN_SENSOR_CHUVA)); 
-   Serial.println("  ");
-   if (analogRead(PIN_SENSOR_CHUVA) > 890)
-   {
-    estado_chuva = "Nao esta chovendo";
-    Serial.println(estado_chuva);
-    digitalWrite(PIN_teto, HIGH);
+    Serial.print("Sensor de Chuva: ");
+    //media leitura do sensor de chuva, pra evitar flutuações rapidas
+    leitura_sensor_chuva = analogRead(PIN_SENSOR_CHUVA);
+    for (int i=0; i< numsamples; i++) {
+      amostra[i] = leitura_sensor_chuva;
+     delay(10);
+     }
+   //quantidade de amostras
+    for (int i=0; i< numsamples; i++) {
+     media_sens_chuva += amostra[i];
     }
-   else
-   {
-    estado_chuva = "Chovendo";
-    Serial.println(estado_chuva);
-    digitalWrite(PIN_teto, LOW);
-   }  
+   media_sens_chuva /= numsamples;
+   Serial.print(media_sens_chuva);
+   Serial.println("  ");
+   if(media_sens_chuva < limite_chuva) {
+    delay(limiar_tempo_chuva);
+      if(leitura_sensor_chuva < limite_chuva) {
+        estado_chuva = "Chovendo";
+        }
+      else {
+        estado_chuva = "Nao esta chovendo";
+        }
+    }        
+     else {
+      estado_chuva = "Nao esta chovendo";
+     }
+   Serial.println(estado_chuva);
+   if(estado_chuva = "Chovendo") {
+    digitalWrite(PIN_teto, LOW); 
+    }
+    else {
+    digitalWrite(PIN_teto, HIGH); 
+    }
    delay(2000);
 }
 
@@ -175,16 +200,18 @@ void handle_OnConnect() {
   Serial.print(estado_nuvens); //Imprime no monitor serial o estado do ceu
   Serial.print("Temperatura do Ceu: ");
   Serial.print(tIRceu); //Imprime no monitor serial o estado do ceu
-  Serial.print("Condição de chuva: ");
-  Serial.print(estado_chuva); //Imprime no monitor serial o estado do ceu  
-  server.send(200, "text/html", EnvioHTML(tavg, u, to, p, estado_nuvens, tIRceu, estado_chuva)); //Envia as informações usando o código 200, especifica o conteúdo como "text/html" e chama a função EnvioHTML
+  Serial.print("Condição de precipitacao: ");
+  Serial.print(estado_chuva); //Imprime no monitor serial o estado do ceu
+  Serial.print("Sensor de Chuva: ");
+  Serial.print(leitura_sensor_chuva); //Imprime no monitor serial o estado do ceu    
+  server.send(200, "text/html", EnvioHTML(tavg, u, to, p, estado_nuvens, tIRceu, estado_chuva, leitura_sensor_chuva)); //Envia as informações usando o código 200, especifica o conteúdo como "text/html" e chama a função EnvioHTML
 }
 
 void handle_NotFound() { //Função para lidar com o erro 404
   server.send(404, "text/plain", "Não encontrado"); //Envia o código 404, especifica o conteúdo como "text/pain" e envia a mensagem "Não encontrado"
 }
 
-String EnvioHTML(float Tstat, float Ustat, float Tostat, float Pstat, String Nstat, float irceustat, String Cstat) { //Exibindo a página da web em HTML
+String EnvioHTML(float Tstat, float Ustat, float Tostat, float Pstat, String Nstat, float irceustat, String Cstat, int Csenschuvstat) { //Exibindo a página da web em HTML
   String ptr = "<!DOCTYPE html> <html>\n"; //Indica o envio do código HTML
   ptr += "<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n"; //Torna a página da Web responsiva em qualquer navegador Web
   ptr += "<meta http-equiv='refresh' content='2'>";//Atualizar browser a cada 2 segundos
@@ -221,10 +248,13 @@ String EnvioHTML(float Tstat, float Ustat, float Tostat, float Pstat, String Nst
   ptr += (String)Nstat;
   ptr += "</p>";
   ptr += "<p><b>Temperatura do ceu: </b>";
-  ptr += (String)irceustat;
+  ptr += (float)irceustat;
   ptr += "</p>";
   ptr += "<p><b>Condicao de precipitacao: </b>";
   ptr += (String)Cstat;
+  ptr += "</p>";
+  ptr += "<p><b>Leitura do sensor de Chuva: </b>";
+  ptr += (int)Csenschuvstat;
   ptr += "</p>";
   
   ptr += "</div>\n";
