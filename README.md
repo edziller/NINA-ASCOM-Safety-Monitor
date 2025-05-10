@@ -1,24 +1,45 @@
-# NINA-ASCOM Safety Monitor
+# NINA-ASCOM-Safety-Monitor
 
-Este projeto implementa uma estação meteorológica automática com NodeMCU ESP-12E para atuar como monitor de segurança (safety monitor) para sessões de astrofotografia utilizando o software NINA.
+Este projeto integra uma **estação meteorológica remota baseada em ESP8266** com o software de astrofotografia **NINA**, por meio de um **driver ASCOM Safety Monitor** totalmente funcional.
 
-## Hardware Utilizado
-- NodeMCU 1.0 (ESP-12E Module)
-- DHT11 (temperatura e umidade)
-- BMP280 (pressão atmosférica)
-- MLX90614 (temperatura do céu - detecção de nuvens)
-- Sensor de chuva analógico
+## 🔧 Visão geral
 
-## Funcionalidade
-A estação publica os dados dos sensores via interface web e, em caso de condições climáticas adversas, pode interromper sessões de captura e acionar o fechamento seguro do observatório.
+- **Firmware**: roda no ESP8266 (NodeMCU) e coleta dados de sensores ambientais (chuva, céu, temperatura, etc).
+- **Driver ASCOM**: desenvolvido em C# para se comunicar via porta serial com o ESP e relatar o status `SAFE/UNSAFE` ao NINA.
+- **Compatível com o ASCOM Platform 6.2 ou superior**
 
-## Esquemático
-![Esquemático](esquematico_estacao_meteorologica.png)
+---
 
-## Código
-O código-fonte está no arquivo `Estacao_meteorologica_observatorio.ino`.
+## 📡 Funcionalidades
 
-## Como usar
-1. Faça upload do código para o NodeMCU via Arduino IDE.
-2. Conecte os sensores conforme o esquema acima.
-3. Acesse o IP do ESP em sua rede local para visualizar os dados.
+- Monitoramento de:
+  - **Chuvas** (sensor analógico)
+  - **Temperatura IR do céu** (MLX90614)
+  - **Umidade e temperatura** (DHT11)
+  - **Pressão atmosférica** (BMP280)
+- Lógica de decisão confiável integrada no firmware:
+  - Prioriza chuva
+  - Considera céu nublado por ≥ 5 minutos
+  - Mantém estado `UNSAFE` até que todas as variáveis estejam seguras
+- Comunicação via **porta serial (COMx)** com taxa de 115200 bps
+- Interface ASCOM segura e compatível com o NINA
+
+---
+
+## 🧰 Estrutura do projeto
+
+```plaintext
+.
+├── Firmware/                        # Código do ESP8266
+│   └── NINA-ASCOM-Safety-Monitor.ino
+│
+├── Driver/                          # Projeto C# do Driver ASCOM
+│   ├── ZillerSafetyMonitor.sln
+│   ├── ZillerSafetyMonitor/
+│   │   ├── *.cs, *.csproj, etc
+│   └── README.txt (interno do instalador)
+│
+├── Docs/
+│   └── esquema_fisico.fritzing      # Esquemático elétrico (a ser melhorado)
+│
+└── README.md                       # Este arquivo
