@@ -4,60 +4,113 @@ por Eduardo Ziller
 ******************************************************************************/
 #include <Wire.h> 
 #include <Adafruit_BMP280.h>
-#include <SparkFunMLX90614.h>
+#include <Adafruit_MLX90614.h>
 #include <ESP8266WiFi.h>
-#include <ESP8266WebServer.h>
+#include <ESPAsyncTCP.h>
+#include <ESPAsyncWebServer.h>
 #include <DHTesp.h> 
+#include <Ticker.h>
+#include <FS.h>
+#include <time.h>
+#include <ArduinoJson.h>
 
-IRTherm therm; // Cria um objeto para o sensor de temperatura
+//IRTherm therm; // Cria um objeto para o sensor de temperatura
+Adafruit_MLX90614 mlx;
 Adafruit_BMP280 bmp; // I2C - Cria um objeto para o Sensor de Pressão
-
+#define FILE_READ "r"
 #define SENSOR_DHT 0 //Define a ligação ao pino de dados do sensor de umidade
-#define PIN_teto 2 //Define a saida para comando do relé pra fechar o teto em caso de condições atmosfericas adversas
+DHTesp dht; //Define o tipo de sensor DHT utilizado
 #define PIN_SENSOR_CHUVA A0 //Definindo a entrada do sensor de chuva
 #define numsamples 20 //Número de amostras para médias
-DHTesp dht; //Define o tipo de sensor DHT utilizado
+#define LOG_INTERVAL_MINUTES  60   // coloque 60 em produção
 
+//Declaração de variáveis
+//Limites e dados calibráveis
 int amostra[numsamples];
-int media_sens_chuva = 0;
-int limite_IR_ceu = 10;
-int limite_chuva = 800;
-int limiar_tempo_chuva = 3000;
-int leitura_sensor_chuva;
+int media_sens_chuva = 0; //variável para calculo da media lida pelo sensor analogico de chuva
+int limite_IR_ceu = 2; // valor limite superior de leitura do sensor IR a partir do qual sera considerada um ceu nublado
+int limite_chuva = 890; // valor do limite infeior lido no sensor de chuva a partir do qual será considerado que ha precipitação
+float limite_u = 85.00; // valor minimo de umidade a ser usado no calculo combinado de condições para SAFE/UNSAFE
+int leitura_sensor_chuva; // valor analogico da leitura do sensor de chuva
+float limite_p = 5.00; // valor minimo de diferença entre a pressão nominal e a pressão lida para ser considerada uma baixa pressão, e portanto indicativo de chuvas
+float h = 1000; //altitude em m
+const size_t MIN_FREE_SPIFFS = 20 * 1024;
+const unsigned long WIFI_RECONNECT_INTERVAL = 10000;  // 10 s
+unsigned long wifiLastCheck = 0;
+unsigned long lastRead = 0;
+const unsigned long readInterval = 5000;
+
+//Variaveis
+int condicaoSeguranca = 0; // 0 = SAFE; 100 = UNSAFE
 float u; // valor da umidade lido pelo DHT
 float t; // valor da temperatura lido pelo DHT
 float to; // temperatura do ponto de orvalho
 float p; // valor da pressão lido pelo BMP280
 float tIRamb; // valor da temperatura lido pelo MLX90614 do ambiente
 float tIRceu; // // valor da temperatura lido pelo MLX90614 do céu
-float tavg; //  valor medio da temperatura entre MLX90614 e o DHT11
-String estado_nuvens; // descreve se está nublado ou ceu claro
-String estado_chuva; // descreve se esta chovendo ou não
-String estado_teto; // descreve se o estado do teto é abrindo, fechando, aberto ou fechado
-byte nuvens;
-byte chuva;
-
+float delta_p;// diferença entre a pressão atmosferica nominal e a atual
+float p_nominal; //pressão nominal calculada para a altitude definida em h
+float p0 = 1013.25; //hPa ao nivel do mar
+float G = 9.81; // aceleração da gravidade m/s^2
+float M = 0.0289644; // massa molar do ar
+float R = 8.31432; // constante universal dos gases
+const char* stationName      = "Estacao Meteorologica Observatorio Eureka";
+const float stationAltitude  = h; // metros
+static int8_t lastLoggedMinute = -1;
+static int8_t lastLoggedHour   = -1;
+unsigned long agora;
+const long TZ_OFFSET = -3L * 3600L;  // UTC-3 em segundos
 
 //Conexão com a rede WiFi
-const char* ssid = "SSID";  // Rede WiFi
-const char* password = "PSWD";  //Senha da Rede WiFi
+const char* ssid = "Ziller_NET_201";  // Rede WiFi
+const char* password = "Mobi3410#qi";  //Senha da Rede WiFi
 
-ESP8266WebServer server(80); //server na porta 80
+//Watchdog
+Ticker watchdog;
+bool watchdogReset = false;
+void alimentarWatchdog() {
+  watchdogReset = true;
+}
+void verificarWatchdog() {
+  if (!watchdogReset) {
+    ESP.restart();
+  }
+  watchdogReset = false;
+}
+
+AsyncWebServer server(80);
+
+// protótipos
+void handleLogging();
+void logData();
+void readSensors();
+void printValores();
+void calculoSeguranca();
 
 void setup() 
 {
-  pinMode(PIN_teto, OUTPUT);
   pinMode(PIN_SENSOR_CHUVA, INPUT);
   Serial.begin(115200); // Inicializa a comunicação serial para o ESP8266
+  delay(100);
+  Serial.printf("===Boot reset reason: %s\n", ESP.getResetReason().c_str());
+  Serial.printf("Free heap at boot: %u\n\n", ESP.getFreeHeap());
   Wire.begin(); //Inicializa o barramento I2C
-  //Inicialização do sensor IR MLX90614
-  therm.begin();
-  if (therm.begin() == false){ // inicia o sensor IR
-    Serial.println("Sensor de temperatura de fundo do céu não detectado! Parando! Verifique as conexões");
-    while(1);
+  watchdog.attach(30, alimentarWatchdog);
+   // —– conecta Wi-Fi —–
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(250);
+    Serial.print(".");
   }
-  Serial.println();
-  therm.setUnit(TEMP_C); //definindo as unidades em Celsius
+  Serial.println("\nWi-Fi conectado, IP = " + WiFi.localIP().toString());
+  // —– sincroniza relógio (para não ficar em 1970!) —–
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  // espera até termos um timestamp válido
+  while (time(nullptr) < 24*3600) {
+    delay(200);
+  }
+   mlx.begin();  // Inicializa o sensor IR
   //Inicialização do sensor de pressão BMP280
   bmp.begin(0x76);
   //Definições padrão do datasheet
@@ -68,201 +121,401 @@ void setup()
                   Adafruit_BMP280::STANDBY_MS_500); // Tempo de espera
   
   dht.setup(SENSOR_DHT, DHTesp::DHT11);//inciailização do DHT com ESP
-  Serial.println();
-  Serial.println("Conectando a Rede: "); //Imprime na serial a mensagem
-  Serial.println(ssid); //Imprime na serial o nome da Rede Wi-Fi
-  WiFi.begin(ssid, password); //Inicialização da comunicação Wi-Fi
-  //Verificação da conexão
-  while (WiFi.status() != WL_CONNECTED) { //Enquanto estiver aguardando status da conexão
-    delay(500);
-    Serial.print("."); //Imprime pontos
+  // 1) monta o SPIFFS
+  if (!SPIFFS.begin()) {
+    Serial.println(F("❌ Erro ao montar SPIFFS!"));
+  } else {
+    Serial.println(F("✅ SPIFFS montado com sucesso, arquivos:"));
+    // 2) abre a raiz
+    Dir dir = SPIFFS.openDir("/");
+    // 3) percorre e lista
+    while (dir.next()) {
+      Serial.print("  • ");
+      Serial.print(dir.fileName());
+      Serial.print("  (");
+      Serial.print(dir.fileSize());
+      Serial.println(" bytes)");
+    }
+    Serial.println();  // só pra dar um espaçamento
   }
-  Serial.println("");
-  Serial.println("WiFi Conectado");
-  Serial.print("IP: ");
-  Serial.println(WiFi.localIP()); //Função para exibir o IP da ESP
-  server.on("/", handle_OnConnect); //Servidor recebe uma solicitação HTTP - chama a função handle_OnConnect
-  server.onNotFound(handle_NotFound); //Servidor recebe uma solicitação HTTP não especificada - chama a função handle_NotFound
-  server.begin(); //Inicializa o servidor
-  Serial.println("Servidor HTTP inicializado");
-  delay(500);
+  // —– registra rotas do web-service —–
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *req){
+    handlePaginaGrafico(req);    // página principal
+  });
+  server.on("/history", HTTP_GET, handleHistory);
+  //Inicializa o servidor
+  server.begin(); 
+  Serial.println("AsyncWebServer iniciado");
+  delay(2000);
  }
 
-void loop() 
-{
-  server.handleClient(); //Chama o método handleClient()
+void loop() { 
+  alimentarWatchdog(); // SW Watchdog
+  handleLogging(); // trata log de dados em SPIFFS
+  // leitura dos sensores
+  agora = millis();
+  if (agora - lastRead >= readInterval) {
+    lastRead = agora;
+    readSensors();
+    calculoSeguranca();
+    //printValores(); // descomente se quiser ver na serial os valores para ajustes do codigo
+    }    
+  if (WiFi.status() != WL_CONNECTED && millis() - wifiLastCheck > WIFI_RECONNECT_INTERVAL) {
+  wifiLastCheck = millis();
+  WiFi.disconnect();
+  WiFi.begin(ssid, password);
+  }
+}
+
+void readSensors(){
+  // leituras dos sensores
+  //DHT11
+  u = dht.getHumidity(); //Le o valor da umidade DHT
+  t = dht.getTemperature(); //Le o valor da temperatura DHT
+  float perc_h = u/100;
+  //Leitura do sensor de pressao BMP280
+  p = bmp.readPressure()/100; // hPa
+  //Chama a leitura do sensor IR
+  tIRceu = mlx.readObjectTempC();  
+  //Calculo da temperatura do ponto de orvalho
   float a = 17.27;
   float b = 237.7;
-  u = dht.getHumidity(); //Le o valor da umidade ESP
-  t = dht.getTemperature(); //Le o valor da temperatura ESP
-  float perc_h = u/100;
-  //Leitura do sensor de pressao
-  p = bmp.readPressure()/100; // Valor da pressão em hPa
-  //Chama a leitura do sensor IR
-  if (therm.read()) //caso sucesso, retorna 0, caso contrario, 1
-    {
-      tIRamb = therm.ambient();
-      tIRceu = therm.object();
-      Serial.println();
-      Serial.print("---------------------------------------------------------------------");
-      Serial.println();
-      Serial.print("Temp. fundo do céu: " + String(tIRceu, 2));
-      Serial.println(" C");
-      //Serial.print("Temp. ambiente: " + String(tIRamb, 2));
-      //Serial.println(" C");
-    }
-    else {
-      Serial.print("---------------------------------------------------------------------");
-      Serial.println("Falha na leitura da tempertatura do sensor infravermelho");
-    }
-    //Rotina para determiação se temos ou nao nuvens no ceu 
-    if(tIRceu > limite_IR_ceu ){ //acaso a temperatura do ceu no zenite seja maior que 5 graus, entende-se que esta nublado
-          estado_nuvens = "Nublado";
-      Serial.print("Condição do Ceu: ");
-      Serial.println(estado_nuvens);     
-    }
-    else{
-      estado_nuvens = "Ceu limpo";
-      Serial.print("Condição do Ceu: ");
-      Serial.println(estado_nuvens);   
-    }
-    //Calculo da temperatura ambiente com base na media dos sensores DHT e MLX
-    tavg = (tIRamb+t)/2;
-    //Calculo da temperatura do ponto de orvalho
-    to = (b*(((a*tavg)/(b+tavg))+log(u/100)))/(a-((a*tavg)/(b+tavg)+log(u/100)));
-    //leitura do sensor de pressão
-    Serial.print(F("Pressão atmosférica = "));
-    Serial.print(p);
-    Serial.println(" hPa");
-    //temperatura DHT
-    Serial.print(F("Temperatura media = "));
-    Serial.print(tavg);
-    Serial.println(" C");
-    //umidade DHT
-    Serial.print(F("Umidade = "));
-    Serial.print(u);
-    Serial.println(" %");
-    //temperatura de orvalho
-    Serial.print(F("T. de orvalho = "));
-    Serial.print(to);
-    Serial.println(" C");
-    //Leitura do sensor de chuva
-    Serial.print("Sensor de Chuva: ");
-    //media leitura do sensor de chuva, pra evitar flutuações rapidas
-    leitura_sensor_chuva = analogRead(PIN_SENSOR_CHUVA);
+  to = (b*(((a*t)/(b+t))+log(u/100)))/(a-((a*t)/(b+t)+log(u/100)));
+  //Calculo da pressão atmosférica local
+  p_nominal=p0 * exp(-M * G * h/(R * (t+272.15)));
+  delta_p = p_nominal - p;
+  //media leitura do sensor de chuva, pra evitar flutuações rapidas
+  leitura_sensor_chuva = analogRead(PIN_SENSOR_CHUVA);
     for (int i=0; i< numsamples; i++) {
-      amostra[i] = leitura_sensor_chuva;
+     amostra[i] = leitura_sensor_chuva;
      delay(10);
      }
-   //quantidade de amostras
+    //quantidade de amostras
     for (int i=0; i< numsamples; i++) {
      media_sens_chuva += amostra[i];
     }
-   media_sens_chuva /= numsamples;
-   Serial.print(media_sens_chuva);
-   Serial.println("  ");
-   if(media_sens_chuva < limite_chuva) {
-    delay(limiar_tempo_chuva);
-      if(leitura_sensor_chuva < limite_chuva) {
-        estado_chuva = "Chovendo";
-        }
-      else {
-        estado_chuva = "Nao esta chovendo";
-        }
-    }        
-     else {
-      estado_chuva = "Nao esta chovendo";
-     }
-   Serial.println(estado_chuva);
-   if(estado_chuva = "Chovendo") {
-    digitalWrite(PIN_teto, LOW); 
-    }
-    else {
-    digitalWrite(PIN_teto, HIGH); 
-    }
-   delay(2000);
+    media_sens_chuva /= numsamples;
 }
 
-void handle_OnConnect() {
-  Serial.print("Temperatura: ");
-  Serial.print(tavg); //Imprime no monitor serial o valor da temperatura media entre o DHT e o IR
-  Serial.println(" ºC");
-  Serial.print("Umidade: ");
-  Serial.print(u); //Imprime no monitor serial o valor da umidade lida
-  Serial.println(" %");
-  Serial.print("Temperatura do ponto de orvalho: ");
-  Serial.print(to); //Imprime no monitor serial o valor da temperatura de orvalho calculada
-  Serial.println(" ºC");
-  Serial.print("Pressão: ");
-  Serial.print(p); //Imprime no monitor serial o valor da pressão lida
-  Serial.println(" hPa");
-  Serial.print("Condição do Ceu: ");
-  Serial.print(estado_nuvens); //Imprime no monitor serial o estado do ceu
-  Serial.print("Temperatura do Ceu: ");
-  Serial.print(tIRceu); //Imprime no monitor serial o estado do ceu
-  Serial.print("Condição de precipitacao: ");
-  Serial.print(estado_chuva); //Imprime no monitor serial o estado do ceu
+ void calculoSeguranca(){
+  // Lógica de decisão de segurança com tempo mínimo para condição de céu nublado
+  if (media_sens_chuva <= limite_chuva) {
+     condicaoSeguranca = 100;
+     estado_chuva = "Chovendo";
+     estado_nuvens = "Nublado";
+    }
+  else if (tIRceu > limite_IR_ceu && u > limite_u && delta_p >= limite_p) {
+     condicaoSeguranca = 100;
+     estado_chuva = "Risco alto de chuva";
+     estado_nuvens = "Nublado";
+    }     
+  else if (tIRceu > limite_IR_ceu && u < limite_u && delta_p <= limite_p){
+    condicaoSeguranca = 0;
+    estado_chuva = "Sem chuva";
+    estado_nuvens = "Nublado";
+  }
+  else {
+     condicaoSeguranca = 0;
+     estado_chuva = "Sem chuva";
+     estado_nuvens = "Céu limpo";
+    }
+  if (condicaoSeguranca == 0) {
+    Serial.println("SAFE");
+   } 
+  else {
+    Serial.println("UNSAFE");
+   }
+ }
+
+ void printValores(){
+   //Plotagem de dados na serial para testes
+   //temperatura Ambiente
+  Serial.println();
+  Serial.print("---------------------------------------------------------------------");
+  Serial.println();
+  Serial.print(F("Temperatura: "));
+  Serial.print(t);
+  Serial.println(" C");
+  //Umidade
+  Serial.print(F("Umidade: "));
+  Serial.print(u);
+  Serial.println(" %");  
+  //Temperatura do ponto de orvalho
+  Serial.print(F("T. de orvalho: "));
+  Serial.print(to);
+  Serial.println(" C");   
+  //Pressão atm. nominal
+  Serial.print(F("Pressão atm. nominal no observatorio = "));
+  Serial.print(p_nominal);
+  Serial.println(" hPa"); 
+  //Pressão medida
+  Serial.print(F("Pressão atmosférica medida: "));
+  Serial.print(p);
+  Serial.println(" hPa"); 
+  //Calculo do delta P (P nominal - P atmosferica medida)
+  Serial.print(F("Delta P: "));
+  Serial.print(delta_p);
+  Serial.println(" hPa"); 
+  // Temperatura de fundo do céu
+  Serial.print("Temp. fundo do céu: ");
+  Serial.print(tIRceu);
+  Serial.println(" C");
+  //Presença de nuvens
+  Serial.print(F("Condição do céu: "));
+  Serial.println(estado_nuvens);
+  //Leitura do sensor de chuva
   Serial.print("Sensor de Chuva: ");
-  Serial.print(leitura_sensor_chuva); //Imprime no monitor serial o estado do ceu    
-  server.send(200, "text/html", EnvioHTML(tavg, u, to, p, estado_nuvens, tIRceu, estado_chuva, leitura_sensor_chuva)); //Envia as informações usando o código 200, especifica o conteúdo como "text/html" e chama a função EnvioHTML
+  Serial.print(media_sens_chuva);
+  Serial.println("  ");
+ }
+
+ void handleHistory(AsyncWebServerRequest *request) {
+  // 1) determina qual arquivo de log abrir (o de hoje)
+  time_t now = time(nullptr);
+  time_t local = now + TZ_OFFSET;
+  struct tm ti;
+  localtime_r(&local, &ti);
+  char dateBuf[16];
+  snprintf(dateBuf, sizeof(dateBuf), "%04d.%02d.%02d",
+           ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+  String fname = String("/") + dateBuf + "_Log_met.txt";
+
+  // 2) abre o stream de resposta
+  AsyncResponseStream *res = request->beginResponseStream("application/json");
+  res->print('[');
+
+  File f = SPIFFS.open(fname, "r");
+  if (!f || !f.available()) {
+    // Se não existir ou estiver vazio, retorna vazio
+    res->print(']');
+    request->send(res);
+    return;
+  }
+
+  bool first = true;
+  // 3) lê linha a linha, cada linha tem "timestamp,t,u,p,..." 
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) continue;
+
+    // separa pelos campos
+    // ex: "2025-05-01T12:00:00,23.4,55.1,1013.2,..." 
+    int idx = 0;
+    String parts[7];
+    while (idx < 6) {
+      int c = line.indexOf(',', 0);
+      if (c < 0) break;
+      parts[idx++] = line.substring(0, c);
+      line = line.substring(c + 1);
+    }
+    parts[idx++] = line;
+
+    if (!first) res->print(',');
+    first = false;
+
+    // 4) constrói o objeto JSON
+    res->print('{');
+    res->printf("\"ts\":\"%s\",", parts[0].c_str());
+    res->printf("\"t\":%s,", parts[1].c_str());
+    res->printf("\"u\":%s,",    parts[2].c_str());
+    res->printf("\"p\":%s,",    parts[3].c_str());
+    res->printf("\"tIR\":%s,",  parts[4].c_str());
+    res->printf("\"rain\":%s,", parts[5].c_str());
+    res->printf("\"safe\":%s",  parts[6].c_str());
+    res->print('}');
+
+    // 5) alimenta o watchdog
+    yield();
+  }
+  f.close();
+
+  res->print(']');
+  request->send(res);
+
+  //Serial.printf("Free heap after /history: %u\n", ESP.getFreeHeap());
 }
 
-void handle_NotFound() { //Função para lidar com o erro 404
-  server.send(404, "text/plain", "Não encontrado"); //Envia o código 404, especifica o conteúdo como "text/pain" e envia a mensagem "Não encontrado"
+void handlePaginaGrafico(AsyncWebServerRequest *request) {
+  // --- monta data ---
+  time_t now = time(nullptr);
+  time_t local = now + TZ_OFFSET;
+  struct tm ti;
+  gmtime_r(&local, &ti);
+  char dateBuf[16];
+  snprintf(dateBuf, sizeof(dateBuf), "%04d.%02d.%02d",
+           ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+
+  // --- calcula tendência como antes ---
+  float T_k      = t + 273.15;
+  float p_nom    = 1013.25 * expf(-0.0289644 * 9.81 * stationAltitude / (8.31423 * T_k));
+  float delta_p  = p_nom - p;
+  String tendencia;
+  if      (delta_p < 0)   tendencia = "Alta";
+  else if (delta_p < 5)  tendencia = "Normal";
+  else                    tendencia = "Baixa";
+
+  // --- cria o stream de resposta ---
+  AsyncResponseStream *res = request->beginResponseStream("text/html");
+
+  // --- escreve cabeçalho e estilos (tudo em PROGMEM com F()) ---
+  res->print(F(
+    "<!DOCTYPE html><html><head>"
+      "<meta charset='utf-8'>"
+      "<meta http-equiv='refresh' content='60'>"
+      "<title>"));
+  res->print(stationName);
+  res->print(F(
+      "</title><style>"
+        "body{font-family:Arial,sans-serif;text-align:center;} "
+      "</style></head><body>"));
+
+  // --- escreve dados principais ---
+  res->print(F("<h1>")); res->print(stationName); res->print(F("</h1>"));
+  res->printf("<h2>Altitude: %.1f m</h2>", stationAltitude);
+  res->printf("<h2>Data: %s</h2>", dateBuf);
+
+  // --- caixa com leituras ---
+  res->print(F("<div class='container'><div class='box'>"));
+  res->printf("<p><strong>Temperatura ambiente:</strong> %.1f °C</p>", t);
+  res->printf("<p><strong>Umidade:</strong> %.1f %%</p>", u);
+  res->printf("<p><strong>Temperatura de orvalho:</strong> %.1f °C</p>", to);
+  res->printf("<p><strong>Pressão Atmosférica:</strong> %.1f hPa</p>", p);
+  res->printf("<p><strong>Tendência pressão:</strong> %s</p>", tendencia.c_str());
+  res->printf("<p><strong>Temp. fundo do céu:</strong> %.1f °C</p>", tIRceu);
+  res->printf("<p><strong>Condição do céu:</strong> %s</p>", estado_nuvens);
+  res->printf("<p><strong>Chuva:</strong> %s</p>", estado_chuva);
+  res->printf("<p><strong>Segurança:</strong> %s</p>", condicaoSeguranca==0?"SAFE":"UNSAFE");
+  res->print(F("</div></div>"));
+
+  // --- envia e mede o heap final ---
+  request->send(res);
+  //Serial.printf("Free heap after stream: %u\n", ESP.getFreeHeap());
 }
 
-String EnvioHTML(float Tstat, float Ustat, float Tostat, float Pstat, String Nstat, float irceustat, String Cstat, int Csenschuvstat) { //Exibindo a página da web em HTML
-  String ptr = "<!DOCTYPE html> <html>\n"; //Indica o envio do código HTML
-  ptr += "<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n"; //Torna a página da Web responsiva em qualquer navegador Web
-  ptr += "<meta http-equiv='refresh' content='2'>";//Atualizar browser a cada 2 segundos
-  ptr += "<link href=\"https://fonts.googleapis.com/css?family=Open+Sans:300,400,600\" rel=\"stylesheet\">\n";
-  ptr += "<title>Monitor de Seguranca</title>\n"; //Define o título da página
+// executa a cada iteração, decide se grava agora
+void handleLogging() {
+  time_t epoch = time(nullptr);
+  time_t localEpoch = epoch + TZ_OFFSET;
+  struct tm ti;
+  localtime_r(&localEpoch, &ti);
+  int currentMinute = ti.tm_min;
+  int currentHour   = ti.tm_hour;
 
-  //Configurações de fonte do título e do corpo do texto da página web
-  ptr += "<style>html { font-family: 'Open Sans', sans-serif; display: block; margin: 0px auto; text-align: center;color: #000000;}\n";
-  ptr += "body{margin-top: 50px;}\n";
-  ptr += "h1 {margin: 50px auto 30px;}\n";
-  ptr += "h2 {margin: 40px auto 20px;}\n";
-  ptr += "p {font-size: 24px;color: #000000;margin-bottom: 10px;}\n";
-  ptr += "</style>\n";
-  ptr += "</head>\n";
-  ptr += "<body>\n";
-  ptr += "<div id=\"webpage\">\n";
-  ptr += "<h1>Monitor de Seguranca Meteorologico do Observatorio</h1>\n";
-  ptr += "<h2>NODEMCU ESP8266 Web Server</h2>\n";
-
-  //Exibe as informações de temperatura e umidade na página web
-  ptr += "<p><b>Temperatura: </b>";
-  ptr += (float)Tstat;
-  ptr += " graus Celsius</p>";
-  ptr += "<p><b>Umidade: </b>";
-  ptr += (float)Ustat;
-  ptr += " %</p>";
-  ptr += "<p><b>Temperatura do ponto de orvalho: </b>";
-  ptr += (float)Tostat;
-  ptr += " graus Celsius</p>";
-  ptr += "<p><b>Pressao atmosferica: </b>";
-  ptr += (float)Pstat;
-  ptr += " hPa</p>";
-  ptr += "<p><b>Condicao do ceu: </b>";
-  ptr += (String)Nstat;
-  ptr += "</p>";
-  ptr += "<p><b>Temperatura do ceu: </b>";
-  ptr += (float)irceustat;
-  ptr += "</p>";
-  ptr += "<p><b>Condicao de precipitacao: </b>";
-  ptr += (String)Cstat;
-  ptr += "</p>";
-  ptr += "<p><b>Leitura do sensor de Chuva: </b>";
-  ptr += (int)Csenschuvstat;
-  ptr += "</p>";
-  
-  ptr += "</div>\n";
-  ptr += "</body>\n";
-  ptr += "</html>\n";
-  return ptr;
-
+  // modo de teste: a cada minuto diferente
+  if (LOG_INTERVAL_MINUTES == 1) {
+    if (currentMinute != lastLoggedMinute) {
+      lastLoggedMinute = currentMinute;
+      logData();
+    }
+  }
+  // modo produção: uma vez por hora no minuto zero
+  else {
+    if (currentMinute == 0 && currentHour != lastLoggedHour) {
+      lastLoggedHour = currentHour;
+      logData();
+    }
+  }
 }
 
+// monta nome do arquivo e grava uma linha com timestamp + leituras
+void logData() {
+  // 0) limpa se estiver sem espaço suficiente
+  cleanupOldLogs(MIN_FREE_SPIFFS); 
 
+  // 1) Obter tempo via NTP (já rodou configTime() no setup)
+  time_t t = time(nullptr);
+  struct tm ti;
+  localtime_r(&t, &ti);
 
+  // 2) Formatar data para nome de arquivo "AAAA.MM.DD"
+  char dateBuf[16];
+  snprintf(dateBuf, sizeof(dateBuf),
+           "%04d.%02d.%02d",
+           ti.tm_year + 1900,
+           ti.tm_mon  + 1,
+           ti.tm_mday);
+
+  // 3) Formatar hora para registro "HH:MM:SS"
+  char timeBuf[16];
+  snprintf(timeBuf, sizeof(timeBuf),
+           "%02d:%02d:%02d",
+           ti.tm_hour,
+           ti.tm_min,
+           ti.tm_sec);
+
+  // 4) Abrir (ou criar) o log do dia em modo append
+  String fname = String("/") + dateBuf + "_Log_met.txt";
+  File f = SPIFFS.open(fname.c_str(), "a");
+  if (!f) {
+    Serial.println("❌ Falha ao abrir log: " + fname);
+    return;
+  }
+
+  // 5) Montar a linha de log
+  //    Ajuste as variáveis t,u,to,p,tIRceu, estado_nuvens, estado_chuva, condicaoSeguranca
+  char buf[128];
+  snprintf(buf, sizeof(buf),
+           "%s, Tamb:%.1fC, Umid:%.1f%%, Tdew:%.1fC, P:%.1fhPa, TIR:%.1fC, Ceu:%s, Chuva:%s, %s\n",
+           timeBuf,
+           t,
+           u,
+           to,
+           p,
+           tIRceu,
+           estado_nuvens.c_str(),
+           estado_chuva.c_str(),
+           (condicaoSeguranca == 0) ? "SAFE" : "UNSAFE"
+  );
+
+  // 6) Gravar e fechar
+  f.print(buf);
+  f.close();
+
+  // 7) (Opcional) debug no Serial
+  //Serial.print("✅ Log gravado em ");
+  //Serial.print(fname);
+  //Serial.print(" -> ");
+  //Serial.print(buf);
+}
+// ----------------------------------------------------------------------------
+// Apaga arquivos de log mais antigos até que reste pelo menos `minFree` bytes
+// ----------------------------------------------------------------------------
+void cleanupOldLogs(size_t minFree) {
+  // 1) obtém estatísticas do SPIFFS
+  FSInfo fs_info;
+  if (!SPIFFS.info(fs_info)) {
+    Serial.println("! SPIFFS.info() falhou");
+    return;
+  }
+  size_t freeBytes = fs_info.totalBytes - fs_info.usedBytes;
+
+  // 2) enquanto não tiver espaço suficiente, apaga o log mais antigo
+  while (freeBytes < minFree) {
+    Dir dir = SPIFFS.openDir("/");
+    String oldestName;
+    // encontra o nome do arquivo mais antigo (lexico)
+    while (dir.next()) {
+      String fn = dir.fileName();
+      if (fn.endsWith("_Log_met.txt")) {
+        if (oldestName.length() == 0 || fn < oldestName) {
+          oldestName = fn;
+        }
+      }
+    }
+    // se não achar nenhum, sai
+    if (oldestName.length() == 0) {
+      Serial.println("! Nenhum log para apagar, mas ainda sem espaço!");
+      break;
+    }
+    // remove o arquivo
+    Serial.printf("Removendo log antigo: %s\n", oldestName.c_str());
+    SPIFFS.remove(oldestName);
+    // atualiza freeBytes para checar de novo
+    if (!SPIFFS.info(fs_info)) {
+      Serial.println("! SPIFFS.info() falhou após remoção");
+      break;
+    }
+    freeBytes = fs_info.totalBytes - fs_info.usedBytes;
+  }
+}
