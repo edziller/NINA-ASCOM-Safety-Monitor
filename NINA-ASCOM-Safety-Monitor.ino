@@ -62,8 +62,8 @@ unsigned long agora;
 const long TZ_OFFSET = -3L * 3600L;  // UTC-3 em segundos
 
 //Conexão com a rede WiFi
-const char* ssid = "Ziller_NET_201";  // Rede WiFi
-const char* password = "Mobi3410#qi";  //Senha da Rede WiFi
+const char* ssid = "SSID";  // Rede WiFi
+const char* password = "PSWD";  //Senha da Rede WiFi
 
 //Watchdog
 Ticker watchdog;
