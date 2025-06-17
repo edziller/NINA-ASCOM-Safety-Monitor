@@ -19,7 +19,8 @@ Este projeto integra uma **estação meteorológica remota baseada em ESP8266** 
   - **Pressão atmosférica** (BMP280)
 - Lógica de decisão confiável integrada no firmware:
   - Prioriza chuva
-  - Considera céu nublado por ≥ 5 minutos
+  - Considera céu nublado se a temperatura de fundo do céu é maior que 2 graus celsius
+  - Considera não seguro, além do sensor de chuva, se está nublado e com umidade alta por mais que dez minutos ou se nublado, com umidade alta e pressão baixa.
   - Mantém estado `UNSAFE` até que todas as variáveis estejam seguras
 - Comunicação via **porta serial (COMx)** com taxa de 115200 bps
 - Interface ASCOM segura e compatível com o NINA
@@ -36,10 +37,10 @@ Este projeto integra uma **estação meteorológica remota baseada em ESP8266** 
 ├── Driver/                          # Projeto C# do Driver ASCOM
 │   ├── ZillerSafetyMonitor.sln
 │   ├── ZillerSafetyMonitor/
-│   │   ├── *.cs, *.csproj, etc
+│   │   ├── *.cs, *.csproj, etc e executavel de instalação do driver
 │   └── README.txt (interno do instalador)
 │
 ├── Docs/
-│   └── esquema_fisico.fritzing      # Esquemático elétrico (a ser melhorado)
+│   └── esquema_fisico.fritzing      # Esquemático elétrico
 │
 └── README.md                       # Este arquivo
