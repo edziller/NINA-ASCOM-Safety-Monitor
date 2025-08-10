@@ -44,7 +44,7 @@ const int ADDR_TIMEOUT_NUBLADO  = 10;  // uso de 2 bytes (uint16 = minutos)
 
 struct Parametros {
   float h;                 // altitude (m)
-  int   limite_chuva;      // ex: 890
+  int   limite_chuva;      // ex: 800
   float limite_p;          // ex: –3.0
   float limite_u;          // ex: 75.0
   float limite_IR_ceu;     // limite IR inferior (ex: 2.0)
@@ -68,7 +68,7 @@ const char* stationName = "Estacao Meteorologica Observatorio Eureka";
 
 void setDefaultParameters() {
   params.h = 0;
-  params.limite_chuva = 890;
+  params.limite_chuva = 800;
   params.limite_p = -3.0;
   params.limite_u = 75.0;
   params.limite_IR_ceu = 2.0;
