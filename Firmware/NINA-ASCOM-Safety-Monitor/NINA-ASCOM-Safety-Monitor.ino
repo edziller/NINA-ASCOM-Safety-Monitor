@@ -69,9 +69,9 @@ const char* stationName = "Estacao Meteorologica Observatorio Eureka";
 void setDefaultParameters() {
   params.h = 0;
   params.limite_chuva = 800;
-  params.limite_p = -3.0;
+  params.limite_p = -2.0;
   params.limite_u = 75.0;
-  params.limite_IR_ceu = 2.0;
+  params.limite_IR_ceu = 8.0;
   params.timeout_nublado = 10;         
 }
 
