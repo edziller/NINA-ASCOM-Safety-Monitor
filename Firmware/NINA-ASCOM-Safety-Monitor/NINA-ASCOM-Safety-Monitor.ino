@@ -26,7 +26,7 @@ Ticker watchdog;
 #define WIFI_RECONNECT_INTERVAL 10000
 #define numsamples 20
 #define TZ_OFFSET -3L * 3600L
-#define MIN_FREE_SPIFFS 20480
+#define MIN_FREE_SPIFFS 51200
 // --- para tendência nas últimas 10 minutos (amostra a cada 5 s = 120 pontos) ---
 #define TREND_WINDOW 360
 
@@ -1147,14 +1147,23 @@ void cleanupOldLogs(size_t minFree) {
   while (freeBytes < minFree) {
     Dir dir = LittleFS.openDir("/");
     String oldest = "";
+
     while (dir.next()) {
       String fn = dir.fileName();
       if (fn.endsWith("_Log_met.csv")) {
-        if (oldest == "" || fn < oldest) oldest = fn;
+        if (oldest == "" || fn < oldest) {
+          oldest = fn;
+        }
       }
     }
+
     if (oldest == "") break;
+
+    Serial.print("Apagando log antigo para liberar espaço: ");
+    Serial.println(oldest);
+
     LittleFS.remove(oldest);
+
     if (!LittleFS.info(fs_info)) break;
     freeBytes = fs_info.totalBytes - fs_info.usedBytes;
   }
