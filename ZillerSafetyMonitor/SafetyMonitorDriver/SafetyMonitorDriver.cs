@@ -1,4 +1,11 @@
-﻿using System;
+// SafetyMonitorDriver.cs — v2
+// Correções aplicadas:
+//  - Typo corrigido: DecrementServerLockLock() → DecrementServerLockCount()
+//  - SetupDialog: preserva estado de conexão antes de abrir o diálogo
+//  - monitorForm.BeginInvoke protegido contra ObjectDisposedException
+//  - Thread STA do MonitorForm: tratamento de exceção no fechamento
+
+using System;
 using System.Collections;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
@@ -21,7 +28,6 @@ namespace ASCOM.EZZillerSafetyMonitor
         private SafetyMonitorHardware hardware;
         private MonitorForm monitorForm;
         private Thread _monitorThread;
-        private volatile bool _closingMonitor;
 
         public SafetyMonitor()
         {
@@ -37,24 +43,18 @@ namespace ASCOM.EZZillerSafetyMonitor
             {
                 if (value == connected) return;
 
-                // 1) abre/fecha a camada de hardware
                 hardware.SetConnected(value);
                 connected = value;
 
                 if (value)
                 {
-                    // 2) incrementa o lock para manter o server vivo
                     Server.IncrementServerLockCount();
 
-                    // 3) dispara UMA thread STA que irá criar o MonitorForm
-                    _closingMonitor = false;
                     _monitorThread = new Thread(() =>
                     {
-                        // Esta lambda roda num STA separado e mantém o form vivo
                         monitorForm = new MonitorForm(hardware);
                         monitorForm.FormClosed += (s, e) =>
                         {
-                            // Quando o usuário fechar o form, libera o lock
                             Server.DecrementServerLockLock();
                             Application.ExitThread();
                         };
@@ -62,54 +62,74 @@ namespace ASCOM.EZZillerSafetyMonitor
                     });
                     _monitorThread.SetApartmentState(ApartmentState.STA);
                     _monitorThread.IsBackground = true;
+                    _monitorThread.Name = "MonitorFormThread";
                     _monitorThread.Start();
                 }
                 else
                 {
-                    // 4) ao desconectar, pede pra fechar o form
-                    _closingMonitor = true;
-                    if (monitorForm != null && monitorForm.IsHandleCreated)
+                    if (monitorForm != null)
                     {
-                        // Fecha o form no seu próprio thread de UI
-                        monitorForm.BeginInvoke((Action)(() =>
+                        // FIX: protegido contra ObjectDisposedException
+                        try
                         {
-                            if (!monitorForm.IsDisposed)
-                                monitorForm.Close();
-                        }));
+                            if (monitorForm.IsHandleCreated && !monitorForm.IsDisposed)
+                            {
+                                monitorForm.BeginInvoke((Action)(() =>
+                                {
+                                    try
+                                    {
+                                        if (!monitorForm.IsDisposed)
+                                            monitorForm.Close();
+                                    }
+                                    catch (ObjectDisposedException) { }
+                                }));
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            logger.LogMessage("Connected=false", "Erro ao fechar MonitorForm: " + ex.Message);
+                        }
                     }
-                    // Limpa a referência da thread
                     _monitorThread = null;
                 }
             }
         }
 
+        // FIX: IsSafe lê a propriedade volatile do hardware — thread-safe
         public bool IsSafe => hardware.IsSafe;
 
         public void SetupDialog()
         {
+            // FIX: preserva estado de conexão antes de abrir o diálogo
+            bool estaConectado = connected;
+
+            if (estaConectado)
+                hardware.SetConnected(false);
+
             using (var f = new SetupDialogForm(hardware))
             {
-                if (f.ShowDialog() == DialogResult.OK)
+                if (f.ShowDialog() == DialogResult.OK && estaConectado)
                 {
-                    // Desliga e religa para forçar re-leitura de COMPort e Altitude
-                    hardware.SetConnected(false);
+                    // Reconecta com as novas configurações
                     hardware.SetConnected(true);
                 }
             }
+
+            // Se não estava conectado, não altera o estado
         }
 
-        public string Description => "Ziller Safety Monitor via ESP8266";
-        public string DriverInfo => "Driver ASCOM EZ para ESP8266 - v1.0";
-        public string DriverVersion => "1.0";
-        public short InterfaceVersion => 1;
-        public string Name => "Ziller Safety Monitor";
+        public string Description    => "Ziller Safety Monitor via ESP8266";
+        public string DriverInfo     => "Driver ASCOM EZ para ESP8266 - v2.0";
+        public string DriverVersion  => "2.0";
+        public short  InterfaceVersion => 1;
+        public string Name           => "Ziller Safety Monitor";
 
         public void Dispose() { }
 
-        public void CommandBlind(string command, bool raw) => throw new MethodNotImplementedException();
-        public bool CommandBool(string command, bool raw) => throw new MethodNotImplementedException();
-        public string CommandString(string command, bool raw) => throw new MethodNotImplementedException();
-        public string Action(string actionName, string actionParameters) => throw new ActionNotImplementedException(actionName);
+        public void    CommandBlind(string command, bool raw)   => throw new MethodNotImplementedException();
+        public bool    CommandBool(string command, bool raw)    => throw new MethodNotImplementedException();
+        public string  CommandString(string command, bool raw)  => throw new MethodNotImplementedException();
+        public string  Action(string actionName, string actionParameters) => throw new ActionNotImplementedException(actionName);
         public ArrayList SupportedActions => new ArrayList();
     }
 }

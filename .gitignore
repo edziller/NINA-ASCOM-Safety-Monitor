@@ -1,0 +1,16 @@
+.vs/
+**/.vs/
+bin/
+obj/
+Output/
+packages/
+
+*.user
+*.suo
+*.cache
+*.pdb
+
+ZillerSafetyMonitor/bin/
+ZillerSafetyMonitor/obj/
+ZillerSafetyMonitor/Output/
+ZillerSafetyMonitor/packages/
