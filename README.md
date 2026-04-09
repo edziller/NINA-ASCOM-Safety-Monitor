@@ -19,8 +19,8 @@ Este projeto integra uma **estação meteorológica remota baseada em ESP8266** 
   - **Pressão atmosférica** (BMP280)
 - Lógica de decisão confiável integrada no firmware:
   - Prioriza chuva
-  - Considera céu nublado se a temperatura de fundo do céu é maior que 2 graus celsius
-  - Considera não seguro, além do sensor de chuva, se está nublado e com umidade alta por mais que dez minutos ou se nublado, com umidade alta e pressão baixa.
+  - Considera céu nublado se a temperatura de fundo do céu é maior que 8 graus celsius (calibrável)
+  - Considera não seguro, além do sensor de chuva, se está nublado e com umidade alta por mais que dez minutos ou se nublado, com umidade alta e pressão baixa (parâmetros calibráveis).
   - Mantém estado `UNSAFE` até que todas as variáveis estejam seguras
 - Comunicação via **porta serial (COMx)** com taxa de 115200 bps
 - Interface ASCOM segura e compatível com o NINA
